@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::io::*;
 use std::fs::File;
 use std::fs;
@@ -129,11 +130,15 @@ fn main() -> Result<()> {
                 let sym_phys_addr = sym_addr - virt_to_phys_addr;
                 println!("Injecting {symbol}.");
 
-                let bytes = fs::read(format!("build/{symbol}.bin"))?;
-                f.seek(SeekFrom::Start(sym_phys_addr))?;
-                f.write(&bytes)?;
+                if Path::new(&format!("build/{symbol}.bin")).exists() {
+                    let bytes = fs::read(format!("build/{symbol}.bin"))?;
+                    f.seek(SeekFrom::Start(sym_phys_addr))?;
+                    f.write(&bytes)?;
 
-                max_addr = std::cmp::max(max_addr, f.seek(SeekFrom::Current(0))?);
+                    max_addr = std::cmp::max(max_addr, f.seek(SeekFrom::Current(0))?);
+                } else {
+                    eprintln!("File 'build/{symbol}.bin' not found. skipped.");
+                }
             },
             "call" => {
                 // TODO: check that it's a BL instruction (0..5 = 0b010010 = 18)
