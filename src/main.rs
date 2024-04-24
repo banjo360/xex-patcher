@@ -58,8 +58,8 @@ fn main() -> Result<()> {
     reading.seek(SeekFrom::Start(offset_pe + offset_nt + 20))?;
     let size_of_opt_headers = reading.read_u16::<LittleEndian>()? as u64;
 
-    let mut start_of_text_section_phys = 0;
     let mut text_section_size_addr = 0;
+    let mut data_section_size_addr = 0;
     for i in 0..number_of_sections {
         reading.seek(SeekFrom::Start(offset_pe + offset_nt + 24 + size_of_opt_headers + i * 40))?;
 
@@ -69,13 +69,19 @@ fn main() -> Result<()> {
 
         if name == ".text" {
             text_section_size_addr = reading.seek(SeekFrom::Current(0))?;
-            reading.seek(SeekFrom::Current(4))?;
-            start_of_text_section_phys = reading.read_u32::<LittleEndian>()? as u64 + offset_pe;
-            break;
+        } else if name == ".data" {
+            data_section_size_addr = reading.seek(SeekFrom::Current(0))?;
+            let _ = reading.read_u32::<LittleEndian>()?;
+            let v_addr = reading.read_u32::<LittleEndian>()?;
+            println!("{name} v_addr: {:#X}", v_addr);
+        } else if name == ".rdata" {
+            let _ = reading.read_u32::<LittleEndian>()?;
+            let v_addr = reading.read_u32::<LittleEndian>()?;
+            println!("{name} v_addr: {:#X}", v_addr);
         }
     }
-    let start_of_text_section_phys = start_of_text_section_phys;
     let text_section_size_addr = text_section_size_addr;
+    let data_section_size_addr = data_section_size_addr;
 
     if text_section_size_addr == 0 {
         panic!("No .text section in file.");
@@ -117,10 +123,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut f = File::options().write(true).open(&args.output)?;
+    let mut f = File::options().read(true).write(true).open(&args.output)?;
 
     let mut curr_addr = symbol_addresses["hack_loop"];
-    let mut max_addr = 0u64;
+    let mut added_bytes_to_text = 0;
+    let mut added_bytes_to_data = 0;
     for patch in patches {
         let patch_data: Vec<_> = patch.split(':').collect();
         match patch_data[0] {
@@ -136,7 +143,18 @@ fn main() -> Result<()> {
                     f.write(&bytes)?;
                     curr_addr += bytes.len() as u64;
 
-                    max_addr = std::cmp::max(max_addr, f.seek(SeekFrom::Current(0))?);
+                    added_bytes_to_text += bytes.len() as u32;
+                } else {
+                    eprintln!("File 'build/{symbol}.bin' not found. skipped.");
+                }
+            },
+            "expand" => {
+                let symbol = patch_data[1].to_string();
+
+                if Path::new(&format!("build/{symbol}.bin")).exists() {
+                    let bytes = fs::read(format!("build/{symbol}.bin"))?;
+                    println!("Adding {} bytes to .data.", bytes.len());
+                    added_bytes_to_data = bytes.len() as u32;
                 } else {
                     eprintln!("File 'build/{symbol}.bin' not found. skipped.");
                 }
@@ -161,13 +179,21 @@ fn main() -> Result<()> {
             }
         }
     }
-    let max_addr = max_addr;
+    let added_bytes_to_text = added_bytes_to_text;
 
-    let new_size = (max_addr - start_of_text_section_phys) as u32;
     f.seek(SeekFrom::Start(text_section_size_addr))?;
-    f.write_u32::<LittleEndian>(new_size)?;
-    // need to patch also the "raw size" (which is the size rounded to some value)
-    // Ghidra shows an error when opening (if size > raw size) but xenia doesn't seem to care
+    let previous_virtual_size = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Current(-4))?;
+    f.write_u32::<LittleEndian>(previous_virtual_size + added_bytes_to_text)?;
+    f.seek(SeekFrom::Current(4))?;
+    let previous_raw_size = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Current(-4))?;
+    f.write_u32::<LittleEndian>(previous_raw_size + added_bytes_to_text)?;
+
+    f.seek(SeekFrom::Start(data_section_size_addr))?;
+    let previous_virtual_size = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Current(-4))?;
+    f.write_u32::<LittleEndian>(previous_virtual_size + added_bytes_to_data)?;
     
     Ok(())
 }
