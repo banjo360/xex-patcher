@@ -119,6 +119,7 @@ fn main() -> Result<()> {
 
     let mut f = File::options().write(true).open(&args.output)?;
 
+    let mut curr_addr = symbol_addresses["hack_loop"];
     let mut max_addr = 0u64;
     for patch in patches {
         let patch_data: Vec<_> = patch.split(':').collect();
@@ -126,14 +127,14 @@ fn main() -> Result<()> {
             "inject" => {
                 let symbol = patch_data[1].to_string();
 
-                let sym_addr = symbol_addresses[&symbol];
-                let sym_phys_addr = sym_addr - virt_to_phys_addr;
-                println!("Injecting {symbol}.");
+                let sym_phys_addr = curr_addr - virt_to_phys_addr;
+                println!("Injecting {symbol} at {:#X}.", curr_addr);
 
                 if Path::new(&format!("build/{symbol}.bin")).exists() {
                     let bytes = fs::read(format!("build/{symbol}.bin"))?;
                     f.seek(SeekFrom::Start(sym_phys_addr))?;
                     f.write(&bytes)?;
+                    curr_addr += bytes.len() as u64;
 
                     max_addr = std::cmp::max(max_addr, f.seek(SeekFrom::Current(0))?);
                 } else {
