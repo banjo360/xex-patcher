@@ -19,8 +19,8 @@ struct Args {
     patch: String,
 
     /// File containing the symbols addresses
-    #[arg(short, long, default_value = "addresses.txt")]
-    addresses: String,
+    #[arg(short, long, default_value = "addresses.txt", value_delimiter = ',', num_args = 1..)]
+    addresses: Vec<String>,
 
     /// File patched
     #[arg(short, long, default_value = "default-patched.xex")]
@@ -80,7 +80,6 @@ fn main() -> Result<()> {
     let mut data_section_size_addr = 0;
     let mut rdata_section_size_addr = 0;
     let mut pdata_section_start = 0;
-    let mut curr_text_addr = 0;
     let mut curr_rdata_addr = 0;
     for i in 0..number_of_sections {
         reading.seek(SeekFrom::Start(offset_pe + offset_nt + 24 + size_of_opt_headers + i * 40))?;
@@ -93,9 +92,6 @@ fn main() -> Result<()> {
             pdata_section_start = reading.seek(SeekFrom::Current(0))?;
         } else if name == ".text" {
             text_section_size_addr = reading.seek(SeekFrom::Current(0))?;
-            let vsize = reading.read_u32::<LittleEndian>()?;
-            let vaddr = reading.read_u32::<LittleEndian>()?;
-            curr_text_addr = base_address + vaddr + vsize;
         } else if name == ".data" {
             data_section_size_addr = reading.seek(SeekFrom::Current(0))?;
         } else if name == ".rdata" {
@@ -116,18 +112,20 @@ fn main() -> Result<()> {
 
     let mut symbol_addresses = HashMap::<String, u32>::new();
 
-    if std::fs::metadata(&args.addresses).is_ok() {
-        for line in std::fs::read_to_string(&args.addresses).unwrap().lines() {
-            let linedata: Vec<_> = line.split(" ").collect();
-            assert_eq!(linedata.len(), 2);
-            
-            let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
-            let name = linedata[1].to_string();
+    for addresses in args.addresses {
+        if std::fs::metadata(&addresses).is_ok() {
+            for line in std::fs::read_to_string(&addresses).unwrap().lines() {
+                let linedata: Vec<_> = line.split(" ").collect();
+                assert_eq!(linedata.len(), 2);
+                
+                let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
+                let name = linedata[1].to_string();
 
-            symbol_addresses.insert(name, addr);
+                symbol_addresses.insert(name, addr);
+            }
+        } else {
+            panic!("can't find '{}'", addresses);
         }
-    } else {
-        panic!("can't find '{}'", args.addresses);
     }
     let symbol_addresses = symbol_addresses;
 
@@ -180,12 +178,11 @@ fn main() -> Result<()> {
                         added_bytes_to_rdata += bytes.len() as u32;
                         curr_rdata_addr += bytes.len() as u32;
                     } else {
+                        let curr_text_addr = symbol_addresses[&symbol];
                         println!("Injecting {symbol} at {:#X}.", curr_text_addr);
                         let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, curr_text_addr) + offset_pe;
                         f.seek(SeekFrom::Start(sym_phys_addr))?;
                         added_bytes_to_text += bytes.len() as u32;
-                        curr_text_addr += bytes.len() as u32;
-                        println!("{} bytes added to {:#X}", bytes.len(), curr_text_addr);
                     }
 
                     f.write(&bytes)?;
@@ -210,8 +207,10 @@ fn main() -> Result<()> {
                 let symbol = patch_data[2].to_string();
                 println!("Patching {call_addr} with {symbol}.");
 
-                let sym_addr = symbol_addresses[&symbol];
-                let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, sym_addr) + offset_pe;
+                let Some(sym_addr) = symbol_addresses.get(&symbol) else {
+                    panic!("Unknown symbol '{symbol}'.");
+                };
+                let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, *sym_addr) + offset_pe;
                 let call_addr = u32::from_str_radix(&call_addr[2..], 16).unwrap();
                 let call_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, call_addr) + offset_pe;
 
