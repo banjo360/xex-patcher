@@ -34,21 +34,39 @@ fn main() -> Result<()> {
     fs::copy(&args.filename, &args.output)?;
 
     let mut base_address = 0;
+    let mut data_descriptor_header = 0;
     let mut reading = File::open(&args.output)?;
     reading.seek(SeekFrom::Start(8))?;
     let offset_pe = reading.read_u32::<BigEndian>()? as u64;
     reading.seek(SeekFrom::Start(20))?;
     let xex_opt_header_count = reading.read_u32::<BigEndian>()? as u64;
-    for i in 0..xex_opt_header_count {
+    for _ in 0..xex_opt_header_count {
         let id = reading.read_u32::<BigEndian>()?;
-        let _ = reading.read_u32::<BigEndian>()?;
+        let val = reading.read_u32::<BigEndian>()?;
 
         if (id >> 8) == 0x102 {
-            reading.seek(SeekFrom::Start(24 + i * 8 + 4))?;
-            base_address = reading.read_u32::<BigEndian>()? as u64;
-            break;
+            base_address = val;
+        } else if (id >> 8) == 0x03 {
+            data_descriptor_header = val;
         }
     }
+
+    let mut zero_offsets = vec![];
+
+    let data_descriptor_header = data_descriptor_header;
+    reading.seek(SeekFrom::Start(data_descriptor_header as u64))?;
+    let ddh_size = reading.read_u32::<BigEndian>()?;
+    let _ = reading.read_u32::<BigEndian>()?;
+    let ddh_count = (ddh_size / 8) - 1;
+    let mut real_position = 0;
+    for _ in 0..ddh_count {
+        let block_size = reading.read_u32::<BigEndian>()?;
+        let block_zero = reading.read_u32::<BigEndian>()?;
+        real_position += block_size;
+        zero_offsets.push((block_size, real_position, block_zero));
+        real_position += block_zero;
+    }
+
     let base_address = base_address;
     assert!(base_address > 0);
     reading.seek(SeekFrom::Start(offset_pe + 60))?;
@@ -60,6 +78,10 @@ fn main() -> Result<()> {
 
     let mut text_section_size_addr = 0;
     let mut data_section_size_addr = 0;
+    let mut rdata_section_size_addr = 0;
+    let mut pdata_section_start = 0;
+    let mut curr_text_addr = 0;
+    let mut curr_rdata_addr = 0;
     for i in 0..number_of_sections {
         reading.seek(SeekFrom::Start(offset_pe + offset_nt + 24 + size_of_opt_headers + i * 40))?;
 
@@ -67,36 +89,39 @@ fn main() -> Result<()> {
         reading.read(&mut name)?;
         let name = std::str::from_utf8(&name).unwrap().trim_matches('\0');
 
-        if name == ".text" {
+        if name == ".pdata" {
+            pdata_section_start = reading.seek(SeekFrom::Current(0))?;
+        } else if name == ".text" {
             text_section_size_addr = reading.seek(SeekFrom::Current(0))?;
+            let vsize = reading.read_u32::<LittleEndian>()?;
+            let vaddr = reading.read_u32::<LittleEndian>()?;
+            curr_text_addr = base_address + vaddr + vsize;
         } else if name == ".data" {
             data_section_size_addr = reading.seek(SeekFrom::Current(0))?;
-            let _ = reading.read_u32::<LittleEndian>()?;
-            let v_addr = reading.read_u32::<LittleEndian>()?;
-            println!("{name} v_addr: {:#X}", v_addr);
         } else if name == ".rdata" {
-            let _ = reading.read_u32::<LittleEndian>()?;
-            let v_addr = reading.read_u32::<LittleEndian>()?;
-            println!("{name} v_addr: {:#X}", v_addr);
+            rdata_section_size_addr = reading.seek(SeekFrom::Current(0))?;
+            let vsize = reading.read_u32::<LittleEndian>()?;
+            let vaddr = reading.read_u32::<LittleEndian>()?;
+            curr_rdata_addr = base_address + vaddr + vsize;
         }
     }
     let text_section_size_addr = text_section_size_addr;
     let data_section_size_addr = data_section_size_addr;
+    let rdata_section_size_addr = rdata_section_size_addr;
+    let pdata_section_start = pdata_section_start;
 
     if text_section_size_addr == 0 {
         panic!("No .text section in file.");
     }
 
-    let virt_to_phys_addr = base_address - offset_pe;
-
-    let mut symbol_addresses = HashMap::<String, u64>::new();
+    let mut symbol_addresses = HashMap::<String, u32>::new();
 
     if std::fs::metadata(&args.addresses).is_ok() {
         for line in std::fs::read_to_string(&args.addresses).unwrap().lines() {
             let linedata: Vec<_> = line.split(" ").collect();
             assert_eq!(linedata.len(), 2);
             
-            let addr = u64::from_str_radix(&linedata[0][2..], 16).unwrap();
+            let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
             let name = linedata[1].to_string();
 
             symbol_addresses.insert(name, addr);
@@ -125,25 +150,45 @@ fn main() -> Result<()> {
 
     let mut f = File::options().read(true).write(true).open(&args.output)?;
 
-    let mut curr_addr = symbol_addresses["hack_loop"];
+    // remove .pdata section
+    f.seek(SeekFrom::Start(text_section_size_addr + 4))?;
+    let text_section_vaddr = f.read_u32::<LittleEndian>()?;
+    let _ = f.read_u32::<LittleEndian>()?;
+    let text_section_raw_ptr = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Start(pdata_section_start))?;
+    f.write_u32::<LittleEndian>(0)?;
+    f.write_u32::<LittleEndian>(text_section_vaddr)?;
+    f.write_u32::<LittleEndian>(0)?;
+    f.write_u32::<LittleEndian>(text_section_raw_ptr)?;
+
     let mut added_bytes_to_text = 0;
     let mut added_bytes_to_data = 0;
+    let mut added_bytes_to_rdata = 0;
     for patch in patches {
         let patch_data: Vec<_> = patch.split(':').collect();
         match patch_data[0] {
             "inject" => {
                 let symbol = patch_data[1].to_string();
 
-                let sym_phys_addr = curr_addr - virt_to_phys_addr;
-                println!("Injecting {symbol} at {:#X}.", curr_addr);
-
                 if Path::new(&format!("build/{symbol}.bin")).exists() {
                     let bytes = fs::read(format!("build/{symbol}.bin"))?;
-                    f.seek(SeekFrom::Start(sym_phys_addr))?;
-                    f.write(&bytes)?;
-                    curr_addr += bytes.len() as u64;
 
-                    added_bytes_to_text += bytes.len() as u32;
+                    if symbol.ends_with(".rdata") {
+                        println!("Injecting {symbol} at {:#X}.", curr_rdata_addr);
+                        let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, curr_rdata_addr) + offset_pe;
+                        f.seek(SeekFrom::Start(sym_phys_addr))?;
+                        added_bytes_to_rdata += bytes.len() as u32;
+                        curr_rdata_addr += bytes.len() as u32;
+                    } else {
+                        println!("Injecting {symbol} at {:#X}.", curr_text_addr);
+                        let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, curr_text_addr) + offset_pe;
+                        f.seek(SeekFrom::Start(sym_phys_addr))?;
+                        added_bytes_to_text += bytes.len() as u32;
+                        curr_text_addr += bytes.len() as u32;
+                        println!("{} bytes added to {:#X}", bytes.len(), curr_text_addr);
+                    }
+
+                    f.write(&bytes)?;
                 } else {
                     eprintln!("File 'build/{symbol}.bin' not found. skipped.");
                 }
@@ -166,8 +211,9 @@ fn main() -> Result<()> {
                 println!("Patching {call_addr} with {symbol}.");
 
                 let sym_addr = symbol_addresses[&symbol];
-                let sym_phys_addr = sym_addr - virt_to_phys_addr;
-                let call_addr = u64::from_str_radix(&call_addr[2..], 16).unwrap() - virt_to_phys_addr;
+                let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, sym_addr) + offset_pe;
+                let call_addr = u32::from_str_radix(&call_addr[2..], 16).unwrap();
+                let call_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, call_addr) + offset_pe;
 
                 f.seek(SeekFrom::Start(call_addr))?;
                 let jump_offset = ((sym_phys_addr as i64) - (call_addr as i64)) as u64;
@@ -194,6 +240,27 @@ fn main() -> Result<()> {
     let previous_virtual_size = f.read_u32::<LittleEndian>()?;
     f.seek(SeekFrom::Current(-4))?;
     f.write_u32::<LittleEndian>(previous_virtual_size + added_bytes_to_data)?;
-    
+
+    f.seek(SeekFrom::Start(rdata_section_size_addr))?;
+    let previous_virtual_size = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Current(-4))?;
+    f.write_u32::<LittleEndian>(previous_virtual_size + added_bytes_to_rdata)?;
+    f.seek(SeekFrom::Current(4))?;
+    let previous_raw_size = f.read_u32::<LittleEndian>()?;
+    f.seek(SeekFrom::Current(-4))?;
+    f.write_u32::<LittleEndian>(previous_raw_size + added_bytes_to_rdata)?;
     Ok(())
+}
+
+fn convert_virtual_address_to_physical_address(base_address: u32, subsections: &Vec<(u32, u32, u32)>, virtual_address: u32) -> u64 {
+    let mut total_removed = 0;
+    let virtual_address = virtual_address - base_address;
+    for (_, virt, zero) in subsections {
+        if virtual_address < *virt {
+            return (virtual_address - total_removed) as u64;
+        } else {
+            total_removed += zero;
+        }
+    }
+    panic!("Unknown address");
 }
