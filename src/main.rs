@@ -19,8 +19,12 @@ struct Args {
     patch: String,
 
     /// File containing the symbols addresses
-    #[arg(short, long, default_value = "addresses.txt", value_delimiter = ',', num_args = 1..)]
-    addresses: Vec<String>,
+    #[arg(short, long, default_value = "addresses.txt")]
+    addresses: String,
+
+    /// File containing the symbols to inject
+    #[arg(short, long, default_value = "addresses.generated.txt")]
+    generated: String,
 
     /// File patched
     #[arg(short, long, default_value = "default-patched.xex")]
@@ -112,7 +116,19 @@ fn main() -> Result<()> {
 
     let mut symbol_addresses = HashMap::<String, u32>::new();
 
-    for addresses in args.addresses {
+    let mut injector = HashMap::new();
+    for line in std::fs::read_to_string(&args.generated).unwrap().lines() {
+        let linedata: Vec<_> = line.split(" ").collect();
+        assert_eq!(linedata.len(), 2);
+        
+        let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
+        let name = linedata[1].to_string();
+
+        injector.insert(addr, name);
+    }
+
+    let args_addresses = vec![args.addresses, args.generated];
+    for addresses in args_addresses {
         if std::fs::metadata(&addresses).is_ok() {
             for line in std::fs::read_to_string(&addresses).unwrap().lines() {
                 let linedata: Vec<_> = line.split(" ").collect();
@@ -162,6 +178,20 @@ fn main() -> Result<()> {
     let mut added_bytes_to_text = 0;
     let mut added_bytes_to_data = 0;
     let mut added_bytes_to_rdata = 0;
+    for (addr, symbol) in injector {
+        if Path::new(&format!("build/{symbol}.bin")).exists() {
+            let bytes = fs::read(format!("build/{symbol}.bin"))?;
+            println!("Injecting {symbol} at {:#X}.", addr);
+            let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, addr) + offset_pe;
+            f.seek(SeekFrom::Start(sym_phys_addr))?;
+            added_bytes_to_text += bytes.len() as u32;
+
+            f.write(&bytes)?;
+        } else {
+            eprintln!("File 'build/{symbol}.bin' not found. skipped.");
+        }
+    }
+
     for patch in patches {
         let patch_data: Vec<_> = patch.split(':').collect();
         match patch_data[0] {
@@ -178,11 +208,7 @@ fn main() -> Result<()> {
                         added_bytes_to_rdata += bytes.len() as u32;
                         curr_rdata_addr += bytes.len() as u32;
                     } else {
-                        let curr_text_addr = symbol_addresses[&symbol];
-                        println!("Injecting {symbol} at {:#X}.", curr_text_addr);
-                        let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, curr_text_addr) + offset_pe;
-                        f.seek(SeekFrom::Start(sym_phys_addr))?;
-                        added_bytes_to_text += bytes.len() as u32;
+                        panic!("Can only inject .rdata blobs, not '{symbol}'");
                     }
 
                     f.write(&bytes)?;
