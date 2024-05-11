@@ -227,17 +227,25 @@ fn main() -> Result<()> {
                     eprintln!("File 'build/{symbol}.bin' not found. skipped.");
                 }
             },
+            "patch" => {
+                let addr = u32::from_str_radix(&patch_data[1], 16).unwrap();
+                let inst = u32::from_str_radix(&patch_data[2], 16).unwrap();
+                let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, addr) + offset_pe;
+                f.seek(SeekFrom::Start(sym_phys_addr))?;
+                f.write_u32::<BigEndian>(inst)?;
+                println!("Patching instruction at {:#X}.", addr);
+            },
             "call" => {
                 // TODO: check that it's a BL instruction (0..5 = 0b010010 = 18)
                 let call_addr = patch_data[1].to_string();
                 let symbol = patch_data[2].to_string();
-                println!("Patching {call_addr} with {symbol}.");
+                println!("Patching 0x{call_addr} with {symbol}.");
 
                 let Some(sym_addr) = symbol_addresses.get(&symbol) else {
                     panic!("Unknown symbol '{symbol}'.");
                 };
                 let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, *sym_addr) + offset_pe;
-                let call_addr = u32::from_str_radix(&call_addr[2..], 16).unwrap();
+                let call_addr = u32::from_str_radix(&call_addr, 16).unwrap();
                 let call_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, call_addr) + offset_pe;
 
                 f.seek(SeekFrom::Start(call_addr))?;
