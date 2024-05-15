@@ -39,7 +39,7 @@ fn main() -> Result<()> {
 
     let mut base_address = 0;
     let mut data_descriptor_header = 0;
-    let mut reading = File::open(&args.output)?;
+    let mut reading = File::open(&args.output).expect(&format!("Can't open {}.", args.output));
     reading.seek(SeekFrom::Start(8))?;
     let offset_pe = reading.read_u32::<BigEndian>()? as u64;
     reading.seek(SeekFrom::Start(20))?;
@@ -162,7 +162,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut f = File::options().read(true).write(true).open(&args.output)?;
+    let mut f = File::options().read(true).write(true).open(&args.output).expect(&format!("Can't read {}.", args.output));
 
     // remove .pdata section
     f.seek(SeekFrom::Start(text_section_size_addr + 4))?;
