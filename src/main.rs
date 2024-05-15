@@ -121,7 +121,7 @@ fn main() -> Result<()> {
         let linedata: Vec<_> = line.split(" ").collect();
         assert_eq!(linedata.len(), 2);
         
-        let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
+        let addr = u32::from_str_radix(&linedata[0], 16).unwrap();
         let name = linedata[1].to_string();
 
         injector.insert(addr, name);
@@ -134,7 +134,7 @@ fn main() -> Result<()> {
                 let linedata: Vec<_> = line.split(" ").collect();
                 assert_eq!(linedata.len(), 2);
                 
-                let addr = u32::from_str_radix(&linedata[0][2..], 16).unwrap();
+                let addr = u32::from_str_radix(&linedata[0], 16).unwrap();
                 let name = linedata[1].to_string();
 
                 symbol_addresses.insert(name, addr);
@@ -235,8 +235,7 @@ fn main() -> Result<()> {
                 f.write_u32::<BigEndian>(inst)?;
                 println!("Patching instruction at {:#X}.", addr);
             },
-            "call" => {
-                // TODO: check that it's a BL instruction (0..5 = 0b010010 = 18)
+            "call" | "jump" => {
                 let call_addr = patch_data[1].to_string();
                 let symbol = patch_data[2].to_string();
                 println!("Patching 0x{call_addr} with {symbol}.");
@@ -250,7 +249,10 @@ fn main() -> Result<()> {
 
                 f.seek(SeekFrom::Start(call_addr))?;
                 let jump_offset = ((sym_phys_addr as i64) - (call_addr as i64)) as u64;
-                let jump = (jump_offset & 0x3FFFFFFC) as u32 | 0x48000001;
+                let mut jump = (jump_offset & 0x3FFFFFFC) as u32 | 0x48000000;
+                if patch_data[0] == "call" {
+                    jump = jump | 1; // update link register
+                }
                 f.write_u32::<BigEndian>(jump)?;
             },
             _ => {
