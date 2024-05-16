@@ -235,6 +235,13 @@ fn main() -> Result<()> {
                 f.write_u32::<BigEndian>(inst)?;
                 println!("Patching instruction at {:#X}.", addr);
             },
+            "noop" | "nop" => {
+                let addr = u32::from_str_radix(&patch_data[1], 16).unwrap();
+                let sym_phys_addr = convert_virtual_address_to_physical_address(base_address, &zero_offsets, addr) + offset_pe;
+                f.seek(SeekFrom::Start(sym_phys_addr))?;
+                f.write_u32::<BigEndian>(0x60000000)?; // ori r0, r0, 0
+                println!("Patching NOOP at {:#X}.", addr);
+            },
             "call" | "jump" => {
                 let call_addr = patch_data[1].to_string();
                 let symbol = patch_data[2].to_string();
