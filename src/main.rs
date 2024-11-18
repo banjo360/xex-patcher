@@ -14,7 +14,7 @@ struct Args {
     #[arg(default_value = "default.xex")]
     filename: String,
 
-    /// File containing the function to inject
+    /// File containing the instructions
     #[arg(default_value = "patch.txt")]
     patch: String,
 
